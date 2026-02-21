@@ -1,11 +1,11 @@
 {
     "display_name": "ST-LifeSim",
-    "loading_order": 100,
+    "loading_order": 50,
     "requires": [],
     "optional": [],
     "js": "bootstrap.js",
     "css": "style.css",
-    "author": "superpimpy",
+    "author": "ST-LifeSim",
     "version": "1.0.0",
-    "homePage": ""
+    "homePage": "https://github.com/superpimpy/ST-LifeSim"
 }
