@@ -8,7 +8,7 @@
  * - 채팅별 또는 캐릭터별 바인딩
  */
 
-import { getContext, getSafeEventHandles } from '../../utils/st-context.js';
+import { getContext } from '../../utils/st-context.js';
 import { loadData, saveData, getExtensionSettings } from '../../utils/storage.js';
 import { registerContextBuilder } from '../../utils/context-inject.js';
 import { showToast, escapeHtml, generateId } from '../../utils/ui.js';
@@ -137,15 +137,11 @@ export function initContacts() {
     });
 
     // 채팅 로드 시 {{char}} 자동 추가
-    try {
-        const { evSrc, eventTypes: evTypes } = getSafeEventHandles();
-        if (evSrc?.on && evTypes?.CHAT_CHANGED) {
-            evSrc.on(evTypes.CHAT_CHANGED, () => {
-                ensureCharContact();
-            });
-        }
-    } catch (e) {
-        console.warn('[ST-LifeSim] 연락처 이벤트 등록 실패:', e);
+    const ctx = getContext();
+    if (ctx?.eventSource && ctx?.event_types) {
+        ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
+            ensureCharContact();
+        });
     }
     // 즉시도 한번 실행
     ensureCharContact();
@@ -655,4 +651,4 @@ function createFormField(container, label, type, value) {
  */
 export function getContacts(binding = 'chat') {
     return loadContacts(binding);
-            }
+}
