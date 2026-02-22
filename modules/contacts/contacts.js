@@ -55,8 +55,10 @@ const MODEL_KEY_BY_SOURCE = {
  * @property {string} personality
  * @property {string} phone
  * @property {string[]} tags
+ * @property {string} [appearanceTags] - 외관 태그 (이미지 생성 시 사용)
  * @property {'chat'|'character'} binding
  * @property {boolean} [isCharAuto] - {{char}} 자동 추가 여부
+ * @property {boolean} [isUserAuto] - {{user}} 자동 추가 여부
  */
 
 /**
@@ -90,27 +92,99 @@ function ensureCharContact() {
     const charName = ctx.name2;
     if (!charName) return;
 
-    const contacts = loadContacts('chat');
-    const exists = contacts.some(c => c.isCharAuto || c.name === charName);
-    if (exists) return;
+    const contacts = loadContacts('character');
+    const existing = contacts.find(c => c.isCharAuto || c.name === charName);
+    const chatContacts = loadContacts('chat');
+    const legacyChatIdx = chatContacts.findIndex(c => c.isCharAuto || c.name === charName);
+    const syncedAvatar = ctx.characters?.[ctx.characterId]?.avatar
+        ? `/characters/${ctx.characters?.[ctx.characterId]?.avatar}`
+        : '';
+    const syncedDescription = ctx.characters?.[ctx.characterId]?.description || '';
+    const syncedPersonality = ctx.characters?.[ctx.characterId]?.personality || '';
+    if (existing) {
+        existing.name = charName;
+        existing.avatar = existing.avatar || syncedAvatar;
+        existing.description = existing.description || syncedDescription;
+        existing.personality = existing.personality || syncedPersonality;
+        existing.isCharAuto = true;
+        existing.binding = 'character';
+        saveContacts(contacts, 'character');
+        return;
+    }
+
+    if (legacyChatIdx !== -1) {
+        const legacy = chatContacts[legacyChatIdx];
+        contacts.push({
+            ...legacy,
+            name: charName,
+            avatar: legacy.avatar || syncedAvatar,
+            description: legacy.description || syncedDescription,
+            personality: legacy.personality || syncedPersonality,
+            binding: 'character',
+            isCharAuto: true,
+        });
+        saveContacts(contacts, 'character');
+        const remainingChatContacts = chatContacts.filter((_, idx) => idx !== legacyChatIdx);
+        saveContacts(remainingChatContacts, 'chat');
+        return;
+    }
 
     contacts.push({
         id: generateId(),
         name: charName,
         displayName: '',
-        avatar: ctx.characters?.[ctx.characterId]?.avatar
-            ? `/characters/${ctx.characters?.[ctx.characterId]?.avatar}`
-            : '',
-        description: ctx.characters?.[ctx.characterId]?.description || '',
+        avatar: syncedAvatar,
+        description: syncedDescription,
         relationToUser: '주요 캐릭터',
         relationToChar: '',
-        personality: ctx.characters?.[ctx.characterId]?.personality || '',
+        personality: syncedPersonality,
         phone: '',
         tags: [],
-        binding: 'chat',
+        binding: 'character',
         isCharAuto: true,
     });
-    saveContacts(contacts, 'chat');
+    saveContacts(contacts, 'character');
+}
+
+/**
+ * {{user}} 연락처를 자동으로 추가한다 (character 바인딩, 외모 태그 전용)
+ * - 선통화/SNS 등 자동 트리거에서는 제외되어야 한다
+ * - 삭제 버튼 없어야 하며 캐릭터 바인딩이어야 한다
+ */
+function ensureUserContact() {
+    const ctx = getContext();
+    if (!ctx) return;
+    const userName = ctx.name1;
+    if (!userName) return;
+
+    const contacts = loadContacts('character');
+    const existing = contacts.find(c => c.isUserAuto || c.name === userName);
+    const userAvatar = document.querySelector('#user_avatar_block .avatar.selected img')?.getAttribute('src') || '';
+    if (existing) {
+        existing.name = userName;
+        existing.avatar = existing.avatar || userAvatar;
+        existing.isUserAuto = true;
+        existing.binding = 'character';
+        saveContacts(contacts, 'character');
+        return;
+    }
+
+    contacts.push({
+        id: generateId(),
+        name: userName,
+        displayName: '',
+        avatar: userAvatar,
+        description: '유저 (플레이어)',
+        relationToUser: '본인',
+        relationToChar: '',
+        personality: '',
+        phone: '',
+        tags: [],
+        appearanceTags: '',
+        binding: 'character',
+        isUserAuto: true,
+    });
+    saveContacts(contacts, 'character');
 }
 
 /**
@@ -138,13 +212,16 @@ export function initContacts() {
 
     // 채팅 로드 시 {{char}} 자동 추가
     const ctx = getContext();
-    if (ctx?.eventSource && ctx?.event_types) {
-        ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
+    const resolvedEventTypes = ctx?.event_types || ctx?.eventTypes;
+    if (ctx?.eventSource && resolvedEventTypes?.CHAT_CHANGED) {
+        ctx.eventSource.on(resolvedEventTypes.CHAT_CHANGED, () => {
             ensureCharContact();
+            ensureUserContact();
         });
     }
     // 즉시도 한번 실행
     ensureCharContact();
+    ensureUserContact();
 }
 
 /**
@@ -246,8 +323,8 @@ function buildContactsContent() {
 
             nameRow.appendChild(name);
 
-            // 캐릭터 자동 추가가 아닌 경우에만 scope 태그 표시 (이름 오른쪽)
-            if (!contact.isCharAuto) {
+            // 캐릭터/유저 자동 추가가 아닌 경우에만 scope 태그 표시 (이름 오른쪽)
+            if (!contact.isCharAuto && !contact.isUserAuto) {
                 const scope = document.createElement('span');
                 scope.className = 'slm-contact-scope';
                 scope.textContent = contact.binding === 'character' ? '캐릭터' : '이 채팅';
@@ -293,7 +370,7 @@ function buildContactsContent() {
 
             row.appendChild(clickArea);
             row.appendChild(editBtn);
-            if (!contact.isCharAuto) {
+            if (!contact.isCharAuto && !contact.isUserAuto) {
                 row.appendChild(delBtn);
             }
             list.appendChild(row);
@@ -339,6 +416,7 @@ function openContactDetailPopup(contact) {
     const fieldDefs = [
         { label: '관계', value: contact.relationToUser },
         { label: '성격/말투', value: contact.personality },
+        { label: '외관 태그', value: contact.appearanceTags },
     ];
 
     fieldDefs.forEach(({ label, value }) => {
@@ -375,13 +453,15 @@ function openContactDialog(existing, defaultBinding, onSave) {
     wrapper.className = 'slm-form';
 
     const fields = {
-        name: createFormField(wrapper, existing?.isCharAuto ? '표시 이름 *' : '이름 *', 'text', existing?.displayName || existing?.name || ''),
+        name: createFormField(wrapper, existing?.isCharAuto ? '표시 이름 *' : (existing?.isUserAuto ? '표시 이름' : '이름 *'), 'text', existing?.displayName || existing?.name || ''),
         avatar: createFormField(wrapper, '프로필 이미지 URL', 'url', existing?.avatar || ''),
         description: createFormField(wrapper, '설명', 'text', existing?.description || ''),
         relationToUser: createFormField(wrapper, '{{user}}와의 관계 *', 'text', existing?.relationToUser || ''),
         relationToChar: createFormField(wrapper, '{{char}}와의 관계', 'text', existing?.relationToChar || ''),
         personality: createFormField(wrapper, '성격/말투', 'text', existing?.personality || ''),
+        appearanceTags: createFormField(wrapper, '🏷️ 외관 태그 (이미지 생성용)', 'text', existing?.appearanceTags || ''),
     };
+    fields.appearanceTags.placeholder = '예: long hair, school uniform, warm smile';
     if (existing?.isCharAuto) {
         fields.name.disabled = true;
         fields.description.disabled = true;
@@ -398,8 +478,13 @@ function openContactDialog(existing, defaultBinding, onSave) {
         };
         fields.avatar.insertAdjacentElement('afterend', restoreAvatarBtn);
     }
+    if (existing?.isUserAuto) {
+        fields.name.disabled = true;
+        fields.description.disabled = true;
+        fields.relationToUser.disabled = true;
+    }
     let selectedBinding = existing?.binding || defaultBinding || 'chat';
-    if (!existing?.isCharAuto) {
+    if (!existing?.isCharAuto && !existing?.isUserAuto) {
         const bindingLbl = document.createElement('label');
         bindingLbl.className = 'slm-label';
         bindingLbl.textContent = '저장 범위';
@@ -440,9 +525,10 @@ function openContactDialog(existing, defaultBinding, onSave) {
 
     saveBtn.onclick = () => {
         const isCharAuto = existing?.isCharAuto === true;
-        const name = isCharAuto ? (existing?.displayName || existing?.name || '').trim() : fields.name.value.trim();
+        const isUserAuto = existing?.isUserAuto === true;
+        const name = (isCharAuto || isUserAuto) ? (existing?.displayName || existing?.name || '').trim() : fields.name.value.trim();
         const relationToUser = fields.relationToUser.value.trim();
-        if (!name || !relationToUser) {
+        if (!name || (!isUserAuto && !relationToUser)) {
             showToast('이름과 관계는 필수입니다.', 'warn');
             return;
         }
@@ -451,21 +537,25 @@ function openContactDialog(existing, defaultBinding, onSave) {
         const targetBinding = selectedBinding;
         const sourceContacts = loadContacts(sourceBinding);
         const targetContacts = targetBinding === sourceBinding ? sourceContacts : loadContacts(targetBinding);
-        const canonicalName = isCharAuto ? (existing?.name || getContext()?.name2 || name) : name;
-        const displayName = isCharAuto && name !== canonicalName ? name : '';
+        const canonicalName = isCharAuto ? (existing?.name || getContext()?.name2 || name)
+            : isUserAuto ? (existing?.name || getContext()?.name1 || name)
+            : name;
+        const displayName = (isCharAuto || isUserAuto) && name !== canonicalName ? name : '';
         const data = {
             id: existing?.id || generateId(),
             name: canonicalName,
             displayName,
             avatar: fields.avatar.value.trim(),
-            description: isCharAuto ? (existing?.description || '') : fields.description.value.trim(),
-            relationToUser,
+            description: (isCharAuto || isUserAuto) ? (existing?.description || '') : fields.description.value.trim(),
+            relationToUser: isUserAuto ? (existing?.relationToUser || '본인') : relationToUser,
             relationToChar: fields.relationToChar.value.trim(),
             personality: fields.personality.value.trim(),
             phone: '',
             tags: existing?.tags || [],
+            appearanceTags: fields.appearanceTags.value.trim(),
             binding: targetBinding,
             isCharAuto,
+            isUserAuto,
         };
 
         if (isEdit) {
@@ -652,3 +742,16 @@ function createFormField(container, label, type, value) {
 export function getContacts(binding = 'chat') {
     return loadContacts(binding);
 }
+
+/**
+ * 이름으로 연락처의 외관 태그를 가져온다.
+ * chat 바인딩과 character 바인딩 모두 검색한다.
+ * @param {string} name - 캐릭터/유저 이름
+ * @returns {string} 외관 태그 문자열 (없으면 빈 문자열)
+ */
+export function getAppearanceTagsByName(name) {
+    if (!name) return '';
+    const allContacts = [...loadContacts('character'), ...loadContacts('chat')];
+    const contact = allContacts.find(c => c.name === name || c.displayName === name);
+    return String(contact?.appearanceTags || '').trim();
+                         }
