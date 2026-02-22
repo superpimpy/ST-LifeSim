@@ -13,8 +13,7 @@ import { loadData, saveData, getDefaultBinding, getExtensionSettings } from '../
 import { registerContextBuilder } from '../../utils/context-inject.js';
 import { showToast, generateId } from '../../utils/ui.js';
 import { createPopup } from '../../utils/popup.js';
-import { getContacts } from '../contacts/contacts.js';
-import { translate } from '../../../../translate/index.js';
+import { getContacts, getAppearanceTagsByName } from '../contacts/contacts.js';
 
 const MODULE_KEY = 'sns-feed';
 const AVATARS_KEY = 'sns-avatars';
@@ -158,6 +157,9 @@ function getSnsPromptSettings() {
         externalApiTimeoutMs: Math.max(1000, Math.min(60000, Number(ext?.snsExternalApiTimeoutMs) || 12000)),
         language: ['ko', 'en', 'ja', 'zh'].includes(ext?.snsLanguage) ? ext.snsLanguage : 'ko',
         koreanTranslationPrompt: String(ext?.snsKoreanTranslationPrompt || 'Translate the following SNS text into natural Korean. Output Korean text only.\n{{text}}').trim(),
+        snsImageMode: ext?.snsImageMode === true,
+        snsImagePrompt: String(ext?.snsImagePrompt || '').trim(),
+        characterAppearanceTags: ext?.characterAppearanceTags && typeof ext.characterAppearanceTags === 'object' ? ext.characterAppearanceTags : {},
     };
 }
 
@@ -263,6 +265,36 @@ function getAuthorLanguage(authorName, fallbackLanguage) {
 function getAuthorDefaultImageUrl(authorName, includeLegacy = true) {
     const map = loadAuthorDefaultImages();
     return map[authorName] || (includeLegacy ? getDefaultImageUrl() : '');
+}
+
+/**
+ * 이미지 생성 API를 사용하여 실제 이미지를 생성한다.
+ * SillyTavern의 /sd 슬래시 커맨드를 사용한다.
+ * @param {string} imagePrompt - 이미지 생성에 사용할 프롬프트
+ * @returns {Promise<string>} 생성된 이미지의 URL 또는 빈 문자열
+ */
+async function generateImageViaApi(imagePrompt) {
+    if (!imagePrompt || !imagePrompt.trim()) return '';
+    try {
+        const ctx = getContext();
+        if (!ctx) {
+            console.warn('[ST-LifeSim] 이미지 생성: 컨텍스트를 가져올 수 없습니다.');
+            return '';
+        }
+        // SillyTavern SlashCommandParser를 통해 /sd 명령어 사용
+        if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
+            const result = await ctx.executeSlashCommandsWithOptions(`/sd quiet=true ${imagePrompt}`, { showOutput: false });
+            const resultStr = String(result?.pipe || result || '').trim();
+            // 결과가 URL-like 문자열이면 반환
+            if (resultStr && (resultStr.startsWith('http') || resultStr.startsWith('/') || resultStr.startsWith('data:'))) {
+                return resultStr;
+            }
+        }
+        return '';
+    } catch (e) {
+        console.warn('[ST-LifeSim] 이미지 생성 API 호출 실패:', e);
+        return '';
+    }
 }
 
 /**
@@ -451,14 +483,41 @@ export async function triggerNpcPosting() {
         const presetPick = getRandomItem(presets);
         const presetImg = presetPick ? presetPick.url : '';
         // 캐릭터별 기본 이미지가 있으면 우선 사용하고, 없을 때만 프리셋으로 보완한다.
-        const finalImageUrl = defaultImg || presetImg;
+        let finalImageUrl = defaultImg || presetImg;
         let imageDescription = '';
-        if (finalImageUrl && (typeof freshCtx.generateQuietPrompt === 'function' || typeof freshCtx.generateRaw === 'function')) {
-            const descPrompt = applyPromptTemplate(promptSettings.templates.imageDescription, {
+        const appearanceTags = getAppearanceTagsByName(pick.name) || String(promptSettings.characterAppearanceTags?.[pick.name] || '').trim();
+        const userName = freshCtx?.name1 || '{{user}}';
+        const userAppearanceTags = getAppearanceTagsByName(userName) || String(promptSettings.characterAppearanceTags?.['{{user}}'] || '').trim();
+        let resolvedImagePrompt = '';
+        if (promptSettings.snsImageMode) {
+            const basePrompt = applyPromptTemplate(promptSettings.templates.imageDescription, {
                 authorName: pick.name,
                 postContent,
             });
-            imageDescription = normalizeSnsText(await generateSnsText(freshCtx, enforceSnsLanguage(descPrompt, authorLanguage), `${pick.name}-image-desc`), SNS_IMAGE_DESC_MAX);
+            resolvedImagePrompt = promptSettings.snsImagePrompt
+                ? promptSettings.snsImagePrompt
+                    .replace(/\{authorName\}/g, pick.name)
+                    .replace(/\{postContent\}/g, postContent)
+                    .replace(/\{appearanceTags\}/g, appearanceTags)
+                    .replace(/\{\{user\}\}/g, freshCtx?.name1 || '{{user}}')
+                    .replace(/\{userAppearanceTags\}/g, userAppearanceTags)
+                : basePrompt;
+            const descPrompt = appearanceTags ? `${resolvedImagePrompt}\nAppearance tags: ${appearanceTags}` : resolvedImagePrompt;
+
+            // 이미지 API를 사용하여 실제 이미지 생성 시도
+            try {
+                const generatedUrl = await generateImageViaApi(descPrompt);
+                if (generatedUrl) {
+                    finalImageUrl = generatedUrl;
+                }
+            } catch (imgErr) {
+                console.warn('[ST-LifeSim] SNS 이미지 생성 실패, 기본 이미지 사용:', imgErr);
+            }
+
+            // 이미지 설명 텍스트 생성
+            if (typeof freshCtx.generateQuietPrompt === 'function' || typeof freshCtx.generateRaw === 'function') {
+                imageDescription = normalizeSnsText(await generateSnsText(freshCtx, enforceSnsLanguage(descPrompt, authorLanguage), `${pick.name}-image-desc`), SNS_IMAGE_DESC_MAX);
+            }
         }
         if (!imageDescription && inlineCaption) imageDescription = inlineCaption;
 
@@ -471,6 +530,7 @@ export async function triggerNpcPosting() {
             content: postContent,
             imageUrl: finalImageUrl,
             imageDescription,
+            imagePrompt: resolvedImagePrompt,
             likes: Math.floor(Math.random() * 30),
             likedByUser: false,
             comments: [],
@@ -1038,7 +1098,10 @@ function createTranslateButton(text, parent, findExisting, translationClass, com
             if (ctx && (typeof ctx.generateRaw === 'function' || typeof ctx.generateQuietPrompt === 'function')) {
                 translated = await generateSnsText(ctx, customPrompt, 'sns-translation', 'snsTranslation');
             }
-            if (!translated) translated = await translate(String(text || ''), 'ko');
+            if (!translated) {
+                showToast('AI 번역 결과가 비어 있습니다.', 'warn', 1200);
+                return;
+            }
             const line = document.createElement('div');
             line.className = translationClass;
             line.textContent = `🇰🇷 ${translated || ''}`.trim();
@@ -1711,4 +1774,4 @@ function openAvatarSettingsDialog(onUpdate) {
         className: 'slm-sub-panel',
         onBack: () => openSnsPopup(),
     });
-}
+        }
