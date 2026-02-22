@@ -478,7 +478,7 @@ body[data-theme="dark"],
 
 .slm-toast {
   background: var(--slm-bg-secondary);
-  color: var(--slm-text) !important;
+  color: var(--slm-toast-font-color, #ffffff) !important;
   padding: 10px 18px;
   border-radius: 20px;
   font-family: var(--slm-font);
@@ -1765,6 +1765,10 @@ body[data-theme="dark"],
   line-height: 1.5;
   word-break: break-word;
 }
+.slm-call-summary-prompt-input {
+  color: var(--slm-text) !important;
+  background: var(--slm-bg-secondary) !important;
+}
 .slm-jump-btn {
   font-size: 11px;
   padding: 3px 8px;
@@ -2178,4 +2182,4 @@ body[data-theme="dark"],
   .slm-gifticon-recipient-row {
     grid-template-columns: 1fr;
   }
-}
+   }
