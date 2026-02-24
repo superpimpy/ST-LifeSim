@@ -14,6 +14,7 @@ import { registerContextBuilder } from '../../utils/context-inject.js';
 import { showToast, generateId } from '../../utils/ui.js';
 import { createPopup } from '../../utils/popup.js';
 import { getContacts, getAppearanceTagsByName } from '../contacts/contacts.js';
+import { generateImageTags } from '../../utils/image-tag-generator.js';
 
 const MODULE_KEY = 'sns-feed';
 const AVATARS_KEY = 'sns-avatars';
@@ -23,10 +24,12 @@ const AUTHOR_DEFAULT_IMAGE_KEY = 'sns-author-default-images'; // { authorName: i
 const IMAGE_PRESETS_KEY = 'sns-image-presets'; // {id,name,url}[]
 const POSTING_ENABLED_KEY = 'sns-posting-enabled'; // { authorName: boolean }
 const AUTHOR_LANGUAGE_KEY = 'sns-author-languages'; // { authorName: ko|en|ja|zh }
+const AUTHOR_MIN_LIKES_KEY = 'sns-author-min-likes'; // { authorName: number }
 const SNS_REPLY_PROBABILITY = 0.7;
 const SNS_EXTRA_COMMENT_PROBABILITY = 0.35;
 const SNS_POST_TEXT_MAX = 280;
 const SNS_IMAGE_DESC_MAX = 220;
+const SNS_RANDOM_LIKES_BONUS_MAX = 30;
 const DEFAULT_SNS_PROMPTS = {
     postChar: 'Write exactly one SNS post for {{charName}}. Use natural language and tone that fit {{charName}}\'s nationality/background, personality, and current situation. Keep it 1-2 casual daily-life sentences. Avoid repeating topics or phrasing from recent posts. Do not include hashtags, image tags, quotation marks, other people\'s reactions/comments, or [caption: ...] blocks. Output only {{charName}}\'s own post text.',
     postContact: 'Write exactly one SNS post for {{authorName}}. Personality: {{personality}}. Use natural language and tone that fit {{authorName}}\'s nationality/background and daily context. Keep it 1-2 casual daily-life sentences and avoid repeating recent topics/phrasing. Do not include hashtags, image tags, quotation marks, other people\'s reactions/comments, or [caption: ...] blocks. Output only {{authorName}}\'s own post text.',
@@ -134,6 +137,20 @@ function savePostingEnabledMap(map) {
     saveData(POSTING_ENABLED_KEY, map, getDefaultBinding());
 }
 
+function loadAuthorMinLikesMap() {
+    return loadData(AUTHOR_MIN_LIKES_KEY, {}, getDefaultBinding());
+}
+
+function saveAuthorMinLikesMap(map) {
+    saveData(AUTHOR_MIN_LIKES_KEY, map, getDefaultBinding());
+}
+
+function getInitialLikes(authorName, fallback = 0) {
+    const minLikes = Math.max(0, parseInt(loadAuthorMinLikesMap()?.[authorName], 10) || 0);
+    if (minLikes <= 0) return Math.max(0, fallback);
+    return minLikes + 1 + Math.floor(Math.random() * SNS_RANDOM_LIKES_BONUS_MAX);
+}
+
 /**
  * SNS 기본 이미지 URL을 가져온다 (하위 호환용)
  * @returns {string}
@@ -155,7 +172,7 @@ function getSnsPromptSettings() {
         templates,
         externalApiUrl: String(ext?.snsExternalApiUrl || '').trim(),
         externalApiTimeoutMs: Math.max(1000, Math.min(60000, Number(ext?.snsExternalApiTimeoutMs) || 12000)),
-        language: ['ko', 'en', 'ja', 'zh'].includes(ext?.snsLanguage) ? ext.snsLanguage : 'ko',
+        language: ['ko', 'en', 'ja', 'zh'].includes(ext?.snsLanguage) ? ext.snsLanguage : 'en',
         koreanTranslationPrompt: String(ext?.snsKoreanTranslationPrompt || 'Translate the following SNS text into natural Korean. Output Korean text only.\n{{text}}').trim(),
         snsImageMode: ext?.snsImageMode === true,
         snsImagePrompt: String(ext?.snsImagePrompt || '').trim(),
@@ -268,6 +285,18 @@ function getAuthorDefaultImageUrl(authorName, includeLegacy = true) {
 }
 
 /**
+ * C2: 최근 SNS 피드에 이미 존재하는 이미지 URL인지 확인한다.
+ * 이전에 생성된 이미지 URL을 재사용하는 버그를 방지한다.
+ * @param {string} url - 확인할 이미지 URL
+ * @returns {boolean} 이미 존재하면 true
+ */
+function isUrlAlreadyInFeed(url) {
+    if (!url) return false;
+    const feed = loadFeed();
+    return feed.some(post => post?.imageUrl === url);
+}
+
+/**
  * 이미지 생성 API를 사용하여 실제 이미지를 생성한다.
  * SillyTavern의 /sd 슬래시 커맨드를 사용한다.
  * @param {string} imagePrompt - 이미지 생성에 사용할 프롬프트
@@ -287,6 +316,11 @@ async function generateImageViaApi(imagePrompt) {
             const resultStr = String(result?.pipe || result || '').trim();
             // 결과가 URL-like 문자열이면 반환
             if (resultStr && (resultStr.startsWith('http') || resultStr.startsWith('/') || resultStr.startsWith('data:'))) {
+                // C2: Reject URLs that already exist in the SNS feed to prevent reuse
+                if (isUrlAlreadyInFeed(resultStr)) {
+                    console.warn('[ST-LifeSim] SNS 이미지 URL이 이미 피드에 존재합니다. 재사용 방지를 위해 거부합니다.');
+                    return '';
+                }
                 return resultStr;
             }
         }
@@ -355,17 +389,48 @@ function getBuiltinUserAvatarUrl() {
     return '/img/user-default.png';
 }
 
+function getBuiltinCharAvatarUrl() {
+    const ctx = getContext();
+    const char = (typeof ctx?.characterId === 'number' && Array.isArray(ctx?.characters))
+        ? ctx.characters[ctx.characterId]
+        : null;
+    const fromData = String(char?.avatar || '').trim();
+    if (fromData) {
+        // avatar 필드가 파일이름만 있으면 /characters/ 경로를 붙인다
+        if (!fromData.startsWith('http') && !fromData.startsWith('/') && !fromData.startsWith('data:')) {
+            return `/characters/${fromData}`;
+        }
+        return fromData;
+    }
+    const fromDom = document.querySelector('#avatar_load_preview img, #avatar_div img, .mesAvatar img')?.getAttribute('src');
+    return fromDom || '';
+}
+
 /**
  * 저자 이름에 대한 아바타 URL을 해결한다 (연락처 연동 고려)
+ * user와 char는 자동연동 설정과 무관하게 항상 연동된다.
  * @param {string} authorName
  * @param {Object} avatars - 수동 아바타 맵
  * @returns {string}
  */
 function resolveAvatar(authorName, avatars) {
     if (avatars[authorName]) return avatars[authorName];
-    if (loadContactLink()) {
-        const contacts = getContacts('chat');
-        const contact = contacts.find(c => c.name === authorName);
+    const ctx = getContext();
+    const userName = ctx?.name1 || 'user';
+    const charName = ctx?.name2 || '';
+    const isUserOrChar = authorName === userName || (charName && authorName === charName);
+    if (authorName === userName) {
+        const builtinUrl = getBuiltinUserAvatarUrl();
+        if (builtinUrl) return builtinUrl;
+    }
+    if (charName && authorName === charName) {
+        const builtinUrl = getBuiltinCharAvatarUrl();
+        if (builtinUrl) return builtinUrl;
+    }
+    // user/char는 contactLink 설정과 무관하게 연락처 아바타도 확인
+    if (isUserOrChar || loadContactLink()) {
+        const allContacts = [...getContacts('character'), ...getContacts('chat')];
+        const contact = allContacts.find(c => c.name === authorName);
         if (contact?.avatar) return contact.avatar;
     }
     return '';
@@ -485,38 +550,34 @@ export async function triggerNpcPosting() {
         // 캐릭터별 기본 이미지가 있으면 우선 사용하고, 없을 때만 프리셋으로 보완한다.
         let finalImageUrl = defaultImg || presetImg;
         let imageDescription = '';
-        const appearanceTags = getAppearanceTagsByName(pick.name) || String(promptSettings.characterAppearanceTags?.[pick.name] || '').trim();
-        const userName = freshCtx?.name1 || '{{user}}';
-        const userAppearanceTags = getAppearanceTagsByName(userName) || String(promptSettings.characterAppearanceTags?.['{{user}}'] || '').trim();
         let resolvedImagePrompt = '';
         if (promptSettings.snsImageMode) {
-            const basePrompt = applyPromptTemplate(promptSettings.templates.imageDescription, {
-                authorName: pick.name,
-                postContent,
+            // 통합 파이프라인: generateImageTags() → Image API
+            // 게시글 내용에서 시각적 장면을 유추할 수 있도록 작성자 정보 포함
+            const allContactsList = [...getContacts('character'), ...getContacts('chat')];
+            const imageInputPrompt = `${pick.name}'s social media photo post: "${postContent}"`;
+            const additionalPrompt = String(getExtensionSettings()?.['st-lifesim']?.tagGenerationAdditionalPrompt || '').trim();
+            const tagResult = await generateImageTags(imageInputPrompt, {
+                includeNames: [pick.name],
+                contacts: allContactsList,
+                getAppearanceTagsByName,
+                tagWeight: Number(getExtensionSettings()?.['st-lifesim']?.tagWeight) || 0,
+                additionalPrompt,
             });
-            resolvedImagePrompt = promptSettings.snsImagePrompt
-                ? promptSettings.snsImagePrompt
-                    .replace(/\{authorName\}/g, pick.name)
-                    .replace(/\{postContent\}/g, postContent)
-                    .replace(/\{appearanceTags\}/g, appearanceTags)
-                    .replace(/\{\{user\}\}/g, freshCtx?.name1 || '{{user}}')
-                    .replace(/\{userAppearanceTags\}/g, userAppearanceTags)
-                : basePrompt;
-            const descPrompt = appearanceTags ? `${resolvedImagePrompt}\nAppearance tags: ${appearanceTags}` : resolvedImagePrompt;
+            resolvedImagePrompt = imageInputPrompt;
 
-            // 이미지 API를 사용하여 실제 이미지 생성 시도
-            try {
-                const generatedUrl = await generateImageViaApi(descPrompt);
-                if (generatedUrl) {
-                    finalImageUrl = generatedUrl;
+            if (tagResult.finalPrompt) {
+                try {
+                    const generatedUrl = await generateImageViaApi(tagResult.finalPrompt);
+                    if (generatedUrl) {
+                        finalImageUrl = generatedUrl;
+                        imageDescription = '';
+                    }
+                } catch (imgErr) {
+                    console.warn('[ST-LifeSim] SNS 이미지 생성 실패, 기본 이미지 사용:', imgErr);
                 }
-            } catch (imgErr) {
-                console.warn('[ST-LifeSim] SNS 이미지 생성 실패, 기본 이미지 사용:', imgErr);
-            }
-
-            // 이미지 설명 텍스트 생성
-            if (typeof freshCtx.generateQuietPrompt === 'function' || typeof freshCtx.generateRaw === 'function') {
-                imageDescription = normalizeSnsText(await generateSnsText(freshCtx, enforceSnsLanguage(descPrompt, authorLanguage), `${pick.name}-image-desc`), SNS_IMAGE_DESC_MAX);
+            } else {
+                console.warn('[ST-LifeSim] SNS 태그 생성 결과 없음, 이미지 생성 건너뜀');
             }
         }
         if (!imageDescription && inlineCaption) imageDescription = inlineCaption;
@@ -531,7 +592,7 @@ export async function triggerNpcPosting() {
             imageUrl: finalImageUrl,
             imageDescription,
             imagePrompt: resolvedImagePrompt,
-            likes: Math.floor(Math.random() * 30),
+            likes: getInitialLikes(pick.name, Math.floor(Math.random() * SNS_RANDOM_LIKES_BONUS_MAX)),
             likedByUser: false,
             comments: [],
             isStory: false,
@@ -1378,26 +1439,63 @@ function openWritePostDialog(onSave) {
 
     const imgLabel = document.createElement('label');
     imgLabel.className = 'slm-label';
-    imgLabel.textContent = '이미지 URL (선택)';
+    imgLabel.textContent = '이미지';
+
+    // ── 이미지 소스 선택: 기본이미지 / URL 직접입력 / AI 생성 ──
+    const imgSourceRow = document.createElement('div');
+    imgSourceRow.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px';
 
     const useDefaultLabel = document.createElement('label');
     useDefaultLabel.className = 'slm-toggle-label';
-    useDefaultLabel.style.marginBottom = '4px';
-    const useDefaultCheck = document.createElement('input');
-    useDefaultCheck.type = 'checkbox';
-    useDefaultCheck.checked = true;
-    useDefaultLabel.appendChild(useDefaultCheck);
-    useDefaultLabel.appendChild(document.createTextNode(' 기본 이미지 사용'));
+    const useDefaultRadio = document.createElement('input');
+    useDefaultRadio.type = 'radio';
+    useDefaultRadio.name = 'slm-img-source';
+    useDefaultRadio.value = 'default';
+    useDefaultRadio.checked = true;
+    useDefaultLabel.appendChild(useDefaultRadio);
+    useDefaultLabel.appendChild(document.createTextNode(' 기본 이미지'));
+
+    const useUrlLabel = document.createElement('label');
+    useUrlLabel.className = 'slm-toggle-label';
+    const useUrlRadio = document.createElement('input');
+    useUrlRadio.type = 'radio';
+    useUrlRadio.name = 'slm-img-source';
+    useUrlRadio.value = 'url';
+    useUrlLabel.appendChild(useUrlRadio);
+    useUrlLabel.appendChild(document.createTextNode(' URL 직접입력'));
+
+    const useAiLabel = document.createElement('label');
+    useAiLabel.className = 'slm-toggle-label';
+    const useAiRadio = document.createElement('input');
+    useAiRadio.type = 'radio';
+    useAiRadio.name = 'slm-img-source';
+    useAiRadio.value = 'ai';
+    useAiLabel.appendChild(useAiRadio);
+    useAiLabel.appendChild(document.createTextNode(' 🎨 AI 이미지 생성'));
+
+    imgSourceRow.appendChild(useDefaultLabel);
+    imgSourceRow.appendChild(useUrlLabel);
+    imgSourceRow.appendChild(useAiLabel);
 
     const imgInput = document.createElement('input');
     imgInput.className = 'slm-input';
     imgInput.type = 'url';
     imgInput.placeholder = 'https://...';
-    imgInput.style.display = useDefaultCheck.checked ? 'none' : '';
+    imgInput.style.display = 'none';
 
-    useDefaultCheck.onchange = () => {
-        imgInput.style.display = useDefaultCheck.checked ? 'none' : '';
-    };
+    const aiImgDescInput = document.createElement('textarea');
+    aiImgDescInput.className = 'slm-textarea';
+    aiImgDescInput.rows = 2;
+    aiImgDescInput.placeholder = '생성할 이미지 설명 (예: 카페에서 셀카를 찍는 모습)';
+    aiImgDescInput.style.display = 'none';
+
+    function updateImgSourceVisibility() {
+        imgInput.style.display = useUrlRadio.checked ? '' : 'none';
+        aiImgDescInput.style.display = useAiRadio.checked ? '' : 'none';
+    }
+    useDefaultRadio.onchange = updateImgSourceVisibility;
+    useUrlRadio.onchange = updateImgSourceVisibility;
+    useAiRadio.onchange = updateImgSourceVisibility;
 
     const imgDescLabel = document.createElement('label');
     imgDescLabel.className = 'slm-label';
@@ -1411,8 +1509,9 @@ function openWritePostDialog(onSave) {
     wrapper.appendChild(contentLabel);
     wrapper.appendChild(contentInput);
     wrapper.appendChild(imgLabel);
-    wrapper.appendChild(useDefaultLabel);
+    wrapper.appendChild(imgSourceRow);
     wrapper.appendChild(imgInput);
+    wrapper.appendChild(aiImgDescInput);
     wrapper.appendChild(imgDescLabel);
     wrapper.appendChild(imgDescInput);
 
@@ -1447,9 +1546,55 @@ function openWritePostDialog(onSave) {
 
         const freshCtx = getContext();
         const authorName = freshCtx?.name1 || 'user';
-        const finalImageUrl = useDefaultCheck.checked
-            ? (getAuthorDefaultImageUrl(authorName) || '')
-            : imgInput.value.trim();
+        const promptSettings = getSnsPromptSettings();
+        let finalImageUrl = '';
+        let imageDescription = imgDescInput.value.trim();
+        let resolvedImagePrompt = '';
+
+        if (useDefaultRadio.checked) {
+            finalImageUrl = getAuthorDefaultImageUrl(authorName) || '';
+        } else if (useUrlRadio.checked) {
+            finalImageUrl = imgInput.value.trim();
+        } else if (useAiRadio.checked) {
+            // AI 이미지 생성 (NPC 게시글과 동일한 파이프라인)
+            const userImageDesc = aiImgDescInput.value.trim() || text;
+            const fallbackImageUrl = getAuthorDefaultImageUrl(authorName) || '';
+
+            // 통합 파이프라인: generateImageTags() → Image API
+            // 유저 SNS 게시글용 이미지: 작성자 컨텍스트 포함
+            showToast('🎨 이미지 생성 중...', 'info', 3000);
+            postBtn.disabled = true;
+
+            try {
+                const allContactsList = [...getContacts('character'), ...getContacts('chat')];
+                const imageInputPrompt = `${authorName}'s social media photo post: "${userImageDesc}"`;
+                const additionalPrompt = String(getExtensionSettings()?.['st-lifesim']?.tagGenerationAdditionalPrompt || '').trim();
+                const tagResult = await generateImageTags(imageInputPrompt, {
+                    includeNames: [authorName].filter(Boolean),
+                    contacts: allContactsList,
+                    getAppearanceTagsByName,
+                    tagWeight: Number(getExtensionSettings()?.['st-lifesim']?.tagWeight) || 0,
+                    additionalPrompt,
+                });
+                resolvedImagePrompt = userImageDesc;
+
+                if (tagResult.finalPrompt) {
+                    const generatedUrl = await generateImageViaApi(tagResult.finalPrompt);
+                    finalImageUrl = generatedUrl || fallbackImageUrl;
+                    if (generatedUrl) imageDescription = '';
+                    if (!generatedUrl) showToast('이미지 생성 결과가 없습니다. 기본 이미지를 사용합니다.', 'warn', 2500);
+                } else {
+                    showToast('태그 변환 실패. 기본 이미지를 사용합니다.', 'warn', 2500);
+                    finalImageUrl = fallbackImageUrl;
+                }
+            } catch (imgErr) {
+                console.warn('[ST-LifeSim] 유저 SNS 이미지 생성 실패:', imgErr);
+                showToast('이미지 생성 실패. 기본 이미지를 사용합니다.', 'warn', 2500);
+                finalImageUrl = fallbackImageUrl;
+            } finally {
+                postBtn.disabled = false;
+            }
+        }
 
         const feed = loadFeed();
         feed.push({
@@ -1459,8 +1604,9 @@ function openWritePostDialog(onSave) {
             date: new Date().toISOString(),
             content: text,
             imageUrl: finalImageUrl,
-            imageDescription: imgDescInput.value.trim(),
-            likes: 0,
+            imageDescription,
+            imagePrompt: resolvedImagePrompt,
+            likes: getInitialLikes(authorName, 0),
             likedByUser: false,
             comments: [],
             isStory: false,
@@ -1638,21 +1784,28 @@ function openAvatarSettingsDialog(onUpdate) {
     const defaultImages = loadAuthorDefaultImages();
     const postingEnabled = loadPostingEnabledMap();
     const authorLanguages = loadAuthorLanguages();
-    const contacts = getContacts('chat');
+    const authorMinLikes = loadAuthorMinLikesMap();
+    const contacts = [...getContacts('character'), ...getContacts('chat')];
     const userName = getContext()?.name1 || 'user';
-    const allProfiles = [{ name: userName, avatar: avatars[userName] || getBuiltinUserAvatarUrl(), personality: 'user' }, ...contacts]
+    const charName = getContext()?.name2 || '';
+    const charProfile = charName
+        ? [{ name: charName, avatar: avatars[charName] || getBuiltinCharAvatarUrl(), personality: 'char' }]
+        : [];
+    const allProfiles = [{ name: userName, avatar: avatars[userName] || getBuiltinUserAvatarUrl(), personality: 'user' }, ...charProfile, ...contacts]
         .filter((c, i, arr) => arr.findIndex(x => x.name === c.name) === i);
 
     allProfiles.forEach(c => {
         if (!userIds[c.name]) userIds[c.name] = makeDefaultHandle(c.name);
         if (c.avatar && !avatars[c.name]) avatars[c.name] = c.avatar;
         if (c.name !== userName && postingEnabled[c.name] == null) postingEnabled[c.name] = true;
-        if (!['ko', 'en', 'ja', 'zh'].includes(authorLanguages[c.name])) authorLanguages[c.name] = 'ko';
+        if (!['ko', 'en', 'ja', 'zh'].includes(authorLanguages[c.name])) authorLanguages[c.name] = 'en';
+        if (authorMinLikes[c.name] == null || Number.isNaN(Number(authorMinLikes[c.name]))) authorMinLikes[c.name] = 0;
     });
     saveUserIds(userIds);
     saveAvatars(avatars);
     savePostingEnabledMap(postingEnabled);
     saveAuthorLanguages(authorLanguages);
+    saveAuthorMinLikesMap(authorMinLikes);
 
     const contactList = document.createElement('div');
     contactList.className = 'slm-form';
@@ -1752,12 +1905,26 @@ function openAvatarSettingsDialog(onUpdate) {
                 saveAuthorLanguages(authorLanguages);
             };
 
+            const minLikesInput = document.createElement('input');
+            minLikesInput.className = 'slm-input';
+            minLikesInput.type = 'number';
+            minLikesInput.min = '0';
+            minLikesInput.max = '1000000';
+            minLikesInput.value = String(Math.max(0, parseInt(authorMinLikes[c.name], 10) || 0));
+            minLikesInput.onchange = () => {
+                authorMinLikes[c.name] = Math.max(0, parseInt(minLikesInput.value, 10) || 0);
+                minLikesInput.value = String(authorMinLikes[c.name]);
+                saveAuthorMinLikesMap(authorMinLikes);
+            };
+
             item.appendChild(Object.assign(document.createElement('label'), { className: 'slm-label', textContent: '아이디(@핸들)' }));
             item.appendChild(handleInput);
             item.appendChild(Object.assign(document.createElement('label'), { className: 'slm-label', textContent: '프로필 이미지 URL' }));
             item.appendChild(avatarInput);
             item.appendChild(Object.assign(document.createElement('label'), { className: 'slm-label', textContent: '게시글/댓글 출력 언어' }));
             item.appendChild(languageSelect);
+            item.appendChild(Object.assign(document.createElement('label'), { className: 'slm-label', textContent: '최소 좋아요 수' }));
+            item.appendChild(minLikesInput);
             item.appendChild(Object.assign(document.createElement('label'), { className: 'slm-label', textContent: '게시글 기본 이미지 프리셋' }));
             item.appendChild(presetSelect);
             if (c.name !== userName) item.appendChild(postToggle);
@@ -1774,4 +1941,4 @@ function openAvatarSettingsDialog(onUpdate) {
         className: 'slm-sub-panel',
         onBack: () => openSnsPopup(),
     });
-        }
+}
