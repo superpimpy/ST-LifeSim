@@ -13,7 +13,8 @@ import { getContext } from '../../utils/st-context.js';
 import { slashSend, slashGen, slashSendAs } from '../../utils/slash.js';
 import { showToast, escapeHtml, generateId } from '../../utils/ui.js';
 import { loadData, saveData, getExtensionSettings } from '../../utils/storage.js';
-import { getAppearanceTagsByName } from '../contacts/contacts.js';
+import { getAppearanceTagsByName, getContacts } from '../contacts/contacts.js';
+import { generateImageTags } from '../../utils/image-tag-generator.js';
 
 // 사건 기록 아카이브 저장 키
 const ARCHIVE_KEY = 'event-archive';
@@ -100,6 +101,10 @@ async function handleQuickSend() {
     }
 }
 
+export async function triggerQuickSend() {
+    await handleQuickSend();
+}
+
 /**
  * 삭제된 메시지 전송: 유저가 삭제된 메시지를 보낸 것처럼 연출한다
  */
@@ -110,6 +115,10 @@ async function handleDeletedMessage() {
     } catch (e) {
         showToast('전송 실패: ' + e.message, 'error');
     }
+}
+
+export async function triggerDeletedMessage() {
+    await handleDeletedMessage();
 }
 
 /**
@@ -239,6 +248,10 @@ async function handleReadReceipt() {
     }
 }
 
+export async function triggerReadReceipt() {
+    await handleReadReceipt();
+}
+
 /**
  * 연락 안 됨 연출 UI를 렌더링한다
  * (char가 user에게 연락했지만 user가 보지 않음)
@@ -291,6 +304,10 @@ async function handleNoContact() {
     } catch (e) {
         showToast('연락 안 됨 연출 실패: ' + e.message, 'error');
     }
+}
+
+export async function triggerNoContact() {
+    await handleNoContact();
 }
 
 /**
@@ -598,6 +615,7 @@ export function renderVoiceMemoUI() {
 
 /**
  * 유저가 이미지를 생성하여 전송한다 (이미지 생성 API 호출)
+ * 통합 파이프라인: generateImageTags() → Image API
  * @param {string} prompt - 이미지 생성 프롬프트
  * @returns {Promise<string>} 생성된 이미지 URL 또는 빈 문자열
  */
@@ -610,11 +628,33 @@ async function generateUserImage(prompt) {
             return '';
         }
         const userName = ctx?.name1 || '';
-        const userAppearanceTags = getAppearanceTagsByName(userName) || getAppearanceTagsByName('{{user}}') || getExtensionSettings()?.['st-lifesim']?.characterAppearanceTags?.['{{user}}'] || '';
-        const finalPrompt = userAppearanceTags ? `${prompt.trim()}, ${String(userAppearanceTags).trim()}` : prompt.trim();
+        const charName = ctx?.name2 || '';
+        const allContactsList = [...getContacts('character'), ...getContacts('chat')];
+
+        // {{user}} → 실제 유저 이름으로 치환하여 외형태그 조회 누락 방지
+        const includeNames = [userName].filter(Boolean);
+        // char 이름도 프롬프트에 언급되었을 수 있으므로 자동 매칭에 맡기되,
+        // 프롬프트에서 명시적으로 언급된 연락처 캐릭터는 generateImageTags 내부에서 자동 감지됨
+
+        // 통합 이미지 태그 생성 (캐릭터 컨텍스트 기반)
+        const tagWeight = Number(getExtensionSettings()?.['st-lifesim']?.tagWeight) || 0;
+        const additionalPrompt = String(getExtensionSettings()?.['st-lifesim']?.tagGenerationAdditionalPrompt || '').trim();
+        const tagResult = await generateImageTags(prompt.trim(), {
+            includeNames,
+            contacts: allContactsList,
+            getAppearanceTagsByName,
+            tagWeight,
+            additionalPrompt,
+        });
+
+        if (!tagResult.finalPrompt) {
+            console.warn('[ST-LifeSim] 유저 이미지 태그 생성 실패, 이미지 생성 건너뜀');
+            showToast('이미지 태그 변환 실패: 이미지 생성을 건너뜁니다', 'warn', 2500);
+            return '';
+        }
+
         if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
-            const result = await ctx.executeSlashCommandsWithOptions(`/sd quiet=true ${finalPrompt}`, { showOutput: false });
-            // result.pipe: 신규 SillyTavern API 반환값, result: 구버전 폴백
+            const result = await ctx.executeSlashCommandsWithOptions(`/sd quiet=true ${tagResult.finalPrompt}`, { showOutput: false });
             const resultStr = String(result?.pipe || result || '').trim();
             if (resultStr && (resultStr.startsWith('http') || resultStr.startsWith('/') || resultStr.startsWith('data:'))) {
                 return resultStr;
@@ -625,6 +665,17 @@ async function generateUserImage(prompt) {
         console.warn('[ST-LifeSim] 유저 이미지 생성 API 호출 실패:', e);
         return '';
     }
+}
+
+export async function triggerUserImageGenerationAndSend(prompt) {
+    const trimmed = String(prompt || '').trim();
+    if (!trimmed) return false;
+    const imageUrl = await generateUserImage(trimmed);
+    if (!imageUrl) return false;
+    const radius = getImageRadius();
+    await slashSend(`<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(trimmed)}" class="slm-quick-image" style="border-radius:${radius}px">`);
+    showToast('이미지 생성 및 전송 완료', 'success', 1500);
+    return true;
 }
 
 /**
@@ -661,4 +712,9 @@ async function handleVoiceMemo(seconds, hint, aiMode = false) {
     } catch (e) {
         showToast('음성메모 삽입 실패: ' + e.message, 'error');
     }
-            }
+}
+
+export async function triggerVoiceMemoInsertion(seconds = 30, hint = '') {
+    const safeSeconds = Math.max(1, Math.min(600, Number(seconds) || 30));
+    await handleVoiceMemo(safeSeconds, String(hint || ''), false);
+}
