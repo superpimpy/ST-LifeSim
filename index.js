@@ -15,7 +15,7 @@
 
 import { getContext } from './utils/st-context.js';
 import { getExtensionSettings } from './utils/storage.js';
-import { injectContext, clearContext } from './utils/context-inject.js';
+import { injectContext, clearContext, registerContextBuilder } from './utils/context-inject.js';
 import { createPopup, createTabs, closePopup } from './utils/popup.js';
 import { showToast, showConfirm, escapeHtml } from './utils/ui.js';
 import { exportAllData, importAllData, clearAllData } from './utils/storage.js';
@@ -23,7 +23,7 @@ import { renderTimeDividerUI, renderReadReceiptUI, renderNoContactUI, renderEven
 import { startFirstMsgTimer, renderFirstMsgSettingsUI } from './modules/firstmsg/firstmsg.js';
 import { initEmoticon, openEmoticonPopup } from './modules/emoticon/emoticon.js';
 import { initContacts, openContactsPopup, getContacts, getAppearanceTagsByName, buildAppearanceTagVariableMap, resolveAppearanceTagVariables } from './modules/contacts/contacts.js';
-import { initCall, onCharacterMessageRenderedForProactiveCall, openCallLogsPopup, triggerProactiveIncomingCall, requestActiveCharacterCall } from './modules/call/call.js';
+import { initCall, isCallActive, onCharacterMessageRenderedForProactiveCall, openCallLogsPopup, triggerProactiveIncomingCall, requestActiveCharacterCall } from './modules/call/call.js';
 import { initWallet, openWalletPopup } from './modules/wallet/wallet.js';
 import { initSns, openSnsPopup, triggerNpcPosting, triggerPendingCommentReaction, hasPendingCommentReaction } from './modules/sns/sns.js';
 import { initCalendar, openCalendarPopup } from './modules/calendar/calendar.js';
@@ -70,11 +70,11 @@ const ROUTE_MODEL_KEY_BY_SOURCE = {
     zai: 'zai_model',
 };
 const SNS_PROMPT_DEFAULTS = {
-    postChar: 'Write exactly one SNS post for {{charName}}. Use natural language and tone that fit {{charName}}\'s nationality/background, personality, and current situation. Keep it 1-2 casual daily-life sentences. Avoid repeating topics or phrasing from recent posts. Do not include hashtags, image tags, quotation marks, other people\'s reactions/comments, or [caption: ...] blocks. Output only {{charName}}\'s own post text.',
-    postContact: 'Write exactly one SNS post for {{authorName}}. Personality: {{personality}}. Use natural language and tone that fit {{authorName}}\'s nationality/background and daily context. Keep it 1-2 casual daily-life sentences and avoid repeating recent topics/phrasing. Do not include hashtags, image tags, quotation marks, other people\'s reactions/comments, or [caption: ...] blocks. Output only {{authorName}}\'s own post text.',
+    postChar: 'Write exactly one SNS post as {{charName}}.\n\n* Before writing, internalize these:\n- {{charName}}\'s personality, speech patterns, and worldview based on profile.\n- Extract the setting and genre from {{charName}}\'s profile itself — it could be modern, medieval fantasy, zombie apocalypse, sci-fi, or anything else. Let that world shape what feels natural to say and how to say it\n- What {{charName}} would actually care about or casually mention on a given day\n--------\n* {{charName}}\'s profile:\n{{personality}}\n--------\n* System Rules:\n- 1–4 sentences, casual and off-the-cuff, like a real personal post\n- Write in the voice and language style that fits {{charName}}\'s background and personality\n- If {{charName}}\'s personality strongly suggests they\'d use emojis, you may include them — otherwise, don\'t\n- No hashtags, no image tags, no quotation marks, no other characters\' reactions, no [caption: ...] blocks\n- Word choice, references, and tone must stay true to the detected world — never bleed in elements from the wrong setting\n- Don\'t be stiff or formal. This is a glimpse into {{charName}}\'s actual inner life, not a public announcement\n\n* System Note\n- Output only {{charName}}\'s post text. Nothing else.\n- Please comply with the output language.\n* This is a post aimed at an unspecified number of people. It is not a 1:1 session to communicate with {{user}}.',
+    postContact: 'Write exactly one SNS post as {{authorName}}.\n\n* Before writing, internalize these:\n- {{authorName}}\'s personality, speech patterns, and worldview based on profile.\n- Extract the setting and genre from {{authorName}}\'s profile itself — it could be modern, medieval fantasy, zombie apocalypse, sci-fi, or anything else. Let that world shape what feels natural to say and how to say it\n- What {{authorName}} would actually care about or casually mention on a given day\n-------\n* {{authorName}}\'s profile:\n{{personality}}\n-------\n* System Rules:\n- 1–2 sentences, casual and off-the-cuff, like a real personal post\n- Write in the voice and language style that fits {{authorName}}\'s background and personality\n- If {{authorName}}\'s personality strongly suggests they\'d use emojis, you may include them — otherwise, don\'t\n- No hashtags, no image tags, no quotation marks, no other characters\' reactions, no [caption: ...] blocks\n- Word choice, references, and tone must stay true to the detected world — never bleed in elements from the wrong setting\n- Don\'t be stiff or formal. This is a glimpse into {{authorName}}\'s actual inner life, not a public announcement\n\n* System Note\n- Output only {{authorName}}\'s post text. Nothing else.\n- Please comply with the output language.',
     imageDescription: 'For {{authorName}}\'s SNS post "{{postContent}}", write exactly one short sentence describing the attached image. Mention only visible content. Do not use hashtags, quotes, parentheses, or any "caption:" prefix.',
-    reply: 'Write exactly one SNS reply for this thread.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nTarget comment author: {{commentAuthorName}} ({{commentAuthorHandle}})\nTarget comment: "{{commentText}}"\nReply author: {{replyAuthorName}} ({{replyAuthorHandle}})\nRules: one sentence only from {{replyAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{replyAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{replyPersonality}}.',
-    extraComment: 'Write exactly one additional SNS comment for this post.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nComment author: {{extraAuthorName}} ({{extraAuthorHandle}})\nRules: one short sentence from {{extraAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{extraAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{extraPersonality}}.',
+    reply: 'Write exactly one SNS reply for this thread.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nTarget comment author: {{commentAuthorName}} ({{commentAuthorHandle}})\nTarget comment: "{{commentText}}"\nReply author: {{replyAuthorName}} ({{replyAuthorHandle}})\nRules: one sentence only from {{replyAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{replyAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{replyPersonality}}. It should be written vividly, fitting the characteristics of each character.',
+    extraComment: 'Write exactly one additional SNS comment for this post.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nComment author: {{extraAuthorName}} ({{extraAuthorHandle}})\nRules: one short sentence from {{extraAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{extraAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{extraPersonality}}. It should be written vividly, fitting the characteristics of each character.',
 };
 
 function normalizeQuickAccessImageUrl(value) {
@@ -117,10 +117,10 @@ const DEFAULT_SETTINGS = {
     snsImageMode: false, // SNS 게시물 이미지 자동 생성 여부
     messageImageGenerationMode: false, // 메신저 이미지 자동 생성 여부 (ON: 이미지 API로 생성, OFF: 줄글 텍스트)
     messageImageTextTemplate: '[사진: {description}]', // OFF일 때 줄글 형식 커스텀 템플릿
-    messageImageInjectionPrompt: '<image_generation_rule>\nWhen {{char}} would naturally send a photo or picture in the conversation, insert a <pic prompt="image description in English for stable diffusion"> tag at that point in your response.\nThink about whether the current context calls for a photo — not only when someone explicitly says "photo" or "picture," but also when the situation naturally suggests one (e.g., {{user}} asks {{char}} to pose or make a V sign, {{char}} wants to show something, a visually interesting moment occurs, {{user}} asks about {{char}}\'s current appearance or activity).\nRules:\n1) Default subject is {{char}} only. Always include {{char}}\'s name explicitly in the prompt.\n2) If other characters from the contacts are involved, include their names explicitly so their appearance can be resolved.\n3) Include {{user}} only when the context explicitly says both are together or the photo is clearly about {{user}}. Use {{user}}\'s name explicitly.\n4) Do not mix appearance traits of multiple people unless the scene explicitly includes multiple people.\n5) Keep the prompt visual and concise using Danbooru-style tag concepts.\n6) Each <pic> tag MUST describe a completely NEW unique scene. NEVER reuse, reference, or modify a previously generated image URL from the conversation. Always write a fresh description.\n7) Analyze visual intent from context — if the user implies a visual action (e.g., "do a V sign", "show me your outfit"), generate a <pic> tag even without the word "photo".\n</image_generation_rule>',
+    messageImageInjectionPrompt: '<image_generation_rule>\nWhen {{char}} would naturally TAKE A PHOTO and SEND IT via messenger, insert a <pic prompt="image description in English for stable diffusion"> tag at that point in your response.\n\nCRITICAL CONSTRAINT — "Camera in hand" rule:\n{{char}} is sending a photo through a messenger app. The ONLY valid images are ones {{char}} could physically take with their own phone camera and send. Ask yourself: "Would {{char}} realistically pull out their phone, take this exact photo, and send it right now?"\n\nALLOWED ({{char}} can take and send these):\n- Selfies ({{char}}\'s own face/outfit/expression)\n- Photos of food, drinks, surroundings {{char}} is currently at\n- Mirror selfies, gym photos, outfit checks\n- Screenshots or photos of objects {{char}} wants to share\n- Pet photos, scenery {{char}} is looking at\n- Photos {{user}} explicitly requested\n\nFORBIDDEN ({{char}} CANNOT take these — do NOT generate <pic> tags):\n- Third-person shots of {{char}} as if photographed by someone else for narrative/mood purposes\n- Dramatic scene illustrations or situation descriptions\n- Cinematic angles that no phone selfie could capture\n- Photos that exist only to describe {{char}}\'s emotional state or current activity narratively\n- Any image that serves as "narration" rather than something {{char}} deliberately chose to photograph and send\n\nRules:\n1) Default subject is {{char}} only. Always include {{char}}\'s name explicitly in the prompt.\n2) If other characters from the contacts are involved, include their names explicitly so their appearance can be resolved.\n3) Include {{user}} only when the context explicitly says both are together or the photo is clearly about {{user}}. Use {{user}}\'s name explicitly.\n4) Do not mix appearance traits of multiple people unless the scene explicitly includes multiple people.\n5) Keep the prompt visual and concise using Danbooru-style tag concepts.\n6) Each <pic> tag MUST describe a completely NEW unique scene. NEVER reuse, reference, or modify a previously generated image URL from the conversation. Always write a fresh description.\n7) Analyze visual intent from context — if the user implies a visual action (e.g., "do a V sign", "show me your outfit"), generate a <pic> tag even without the word "photo".\n8) Do NOT generate images just because the conversation mentions a visual scene. Only generate when {{char}} would deliberately pick up their phone to take and send a photo.\n</image_generation_rule>',
     tagGenerationAdditionalPrompt: '',
-    snsImagePrompt: 'Create a photorealistic image for {authorName}\'s SNS post. Character appearance: {appearanceTags}. Post content: "{postContent}". The image must accurately depict the scene described in the post. Focus on matching the subject, setting, and mood of the post text. Style: casual daily-life smartphone photo, natural lighting, candid feel. Use Danbooru-style concepts and prefer spaces instead of underscores.',
-    messageImagePrompt: 'Generate a photorealistic image that {charName} would send via messenger. Character appearance: {appearanceTags}. The image must reflect the character\'s physical appearance accurately based on the appearance tags. Style: personal candid photo matching the conversation context, natural and authentic feel. Use Danbooru-style concepts and prefer spaces instead of underscores.',
+    snsImagePrompt: '<ImagePrompt>\n<instructions>\nConstruct a detailed image prompt for a photo {{char}} posts on Instagram (or similar SNS) right now.\nBased on the current conversation history and {{char}}\'s Persona.\n\nSTRICT ADHERENCE REQUIRED:\n0. Banned tags\n* handphone\n* handheld phone\n\n1. Fusion of Elements: Do not list traits separately. Fuse {personality}, {appearance}, and {context} into a single "curated moment."\n\n2. Intent: Why is this photo being posted publicly? To show off? To send an indirect message? To craft an image? The expression and composition must reflect this intent.\n\n3. SNS Authenticity: This is an Instagram post. It should look intentionally daily and casually styled — aesthetic lighting, flattering angles, but not overly studio-polished.\n\n4. Sensory Details: Focus on overall composition, color palette mood, background aesthetic, and subtle styling choices (outfit, props, setting) that communicate the character\'s persona.\n\n5. Caption Energy: Briefly note what kind of vibe the photo gives off — the "story" a follower would read into it.\n\n6. Tags: Use Danbooru-style tags for appearance features (e.g., black hair, mole under eye) without underscores in the narrative description.\n</instructions>\n\n<context>\nCurrent situation: {{char}} is crafting a public SNS post.\nRecent emotional tone: Evaluate the last 3 messages.\n</context>\n\n<note>\n* Don\'t merge or edit character\'s own appearance tags.\n* The photo should feel like something real people actually post — aspirational but not impossible.\n* keep this tags: human focus, highres, absurdres, ai-generated\n</note>\n</ImagePrompt>',
+    messageImagePrompt: '<ImagePrompt>\n<instructions>\nConstruct a detailed image prompt for a photo {{char}} sends to {{user}} via private messenger right now.\nBased on the current conversation history and {{char}}\'s Persona.\n\nSTRICT ADHERENCE REQUIRED:\n0. Banned tags\n*\n\n1. Fusion of Elements: Do not list traits separately. Fuse {personality}, {appearance}, and {context} into a single "captured moment."\n\n2. Intent: Why is this photo being sent? To tease? To prove a point? To show vulnerability? The expression must reflect this intent.\n\n3. Messenger Authenticity: This is a private DM, NOT a social media post. It must look slightly unpolished and intimate. Avoid studio lighting or perfect symmetry.\n\n4. Sensory Details: Focus on micro-expressions (lip tension, focus), hand placement, and lighting mood.\n\n5. Tags: Use Danbooru-style tags for appearance features (e.g., black hair, mole under eye) without underscores in the narrative description.\n</instructions>\n\n<context>\nCurrent situation: {{char}} is messaging {{user}}.\nRecent emotional tone: Evaluate the last 3 messages.\n</context>\n<note>\n* Don\'t merge or edit character\'s own appearance tags.\n* The photo should feel like something real people actually pictured — aspirational but not impossible.\n* keep this tags: human focus, highres, absurdres, ai-generated.\n</note>\n</ImagePrompt>',
     characterAppearanceTags: {}, // { [charName]: "tag1, tag2" }
     tagWeight: 5, // 태그 가중치 (예: 5 → "5::(tags)::")
     callAudio: {
@@ -1273,6 +1273,29 @@ function openSettingsPanel(onBack) {
         });
         wrapper.appendChild(hint);
 
+        // ── 등록/미등록 소분류 탭 ──
+        const subTabRow = document.createElement('div');
+        subTabRow.style.display = 'flex';
+        subTabRow.style.gap = '6px';
+        subTabRow.style.marginBottom = '8px';
+        subTabRow.style.marginTop = '8px';
+        let activeSubTab = 'registered';
+        const subTabRegistered = document.createElement('button');
+        subTabRegistered.className = 'slm-btn slm-btn-sm slm-btn-primary';
+        subTabRegistered.textContent = '✅ 등록';
+        const subTabUnregistered = document.createElement('button');
+        subTabUnregistered.className = 'slm-btn slm-btn-sm slm-btn-ghost';
+        subTabUnregistered.textContent = '⬜ 미등록';
+        const updateSubTabStyle = () => {
+            subTabRegistered.className = 'slm-btn slm-btn-sm' + (activeSubTab === 'registered' ? ' slm-btn-primary' : ' slm-btn-ghost');
+            subTabUnregistered.className = 'slm-btn slm-btn-sm' + (activeSubTab === 'unregistered' ? ' slm-btn-primary' : ' slm-btn-ghost');
+        };
+        subTabRegistered.onclick = () => { activeSubTab = 'registered'; updateSubTabStyle(); renderItems(); };
+        subTabUnregistered.onclick = () => { activeSubTab = 'unregistered'; updateSubTabStyle(); renderItems(); };
+        subTabRow.appendChild(subTabRegistered);
+        subTabRow.appendChild(subTabUnregistered);
+        wrapper.appendChild(subTabRow);
+
         const list = document.createElement('div');
         list.className = 'slm-form';
         wrapper.appendChild(list);
@@ -1283,7 +1306,22 @@ function openSettingsPanel(onBack) {
             QUICK_ACCESS_ITEMS
                 .filter(item => !ordered.some(v => v.key === item.key))
                 .forEach(item => ordered.push(item));
-            ordered.forEach((item, idx) => {
+            const isRegistered = (item) => settings.quickAccess?.items?.[item.key] !== false;
+            const filteredItems = ordered.filter(item =>
+                activeSubTab === 'registered' ? isRegistered(item) : !isRegistered(item)
+            );
+            if (filteredItems.length === 0) {
+                const emptyMsg = document.createElement('div');
+                emptyMsg.className = 'slm-desc';
+                emptyMsg.style.textAlign = 'center';
+                emptyMsg.style.padding = '16px 0';
+                emptyMsg.textContent = activeSubTab === 'registered'
+                    ? '등록된 퀵 액세스 항목이 없습니다.'
+                    : '미등록 항목이 없습니다.';
+                list.appendChild(emptyMsg);
+                return;
+            }
+            filteredItems.forEach((item, idx) => {
                 const row = document.createElement('div');
                 row.className = 'slm-settings-row slm-qa-settings-item';
                 row.dataset.qaKey = item.key;
@@ -1320,7 +1358,7 @@ function openSettingsPanel(onBack) {
                     textContent: '▼',
                     title: '아래로 이동',
                 });
-                downBtn.disabled = idx === ordered.length - 1;
+                downBtn.disabled = idx === filteredItems.length - 1;
                 downBtn.addEventListener('click', () => swapOrder(1));
                 headerRow.appendChild(upBtn);
                 headerRow.appendChild(downBtn);
@@ -1336,6 +1374,7 @@ function openSettingsPanel(onBack) {
                     settings.quickAccess.items[item.key] = chk.checked;
                     saveSettings();
                     refreshQuickAccessFab();
+                    renderItems();
                 };
                 lbl.appendChild(chk);
                 lbl.appendChild(document.createTextNode(` ${item.icon} ${item.label}`));
@@ -1597,6 +1636,7 @@ function openSettingsPanel(onBack) {
             saveSettings();
         };
         textTemplateGroup.appendChild(textTemplateResetBtn);
+        textTemplateGroup.appendChild(createPromptSaveBtn());
         wrapper.appendChild(textTemplateGroup);
 
         // ── 태그 가중치 설정 ──
@@ -1661,6 +1701,7 @@ function openSettingsPanel(onBack) {
             saveSettings();
         };
         snsImagePromptGroup.appendChild(snsImagePromptResetBtn);
+        snsImagePromptGroup.appendChild(createPromptSaveBtn());
         wrapper.appendChild(snsImagePromptGroup);
 
         const messageImagePromptGroup = document.createElement('div');
@@ -1682,6 +1723,7 @@ function openSettingsPanel(onBack) {
             saveSettings();
         };
         messageImagePromptGroup.appendChild(messageImagePromptResetBtn);
+        messageImagePromptGroup.appendChild(createPromptSaveBtn());
         wrapper.appendChild(messageImagePromptGroup);
 
         // 이미지 생성 프롬프트 주입 (AI에게 보내는 지시)
@@ -1709,6 +1751,7 @@ function openSettingsPanel(onBack) {
             saveSettings();
         };
         injectionPromptGroup.appendChild(injectionPromptResetBtn);
+        injectionPromptGroup.appendChild(createPromptSaveBtn());
         wrapper.appendChild(injectionPromptGroup);
 
         const tagAdditionalPromptGroup = document.createElement('div');
@@ -1735,6 +1778,7 @@ function openSettingsPanel(onBack) {
             saveSettings();
         };
         tagAdditionalPromptGroup.appendChild(tagAdditionalPromptResetBtn);
+        tagAdditionalPromptGroup.appendChild(createPromptSaveBtn());
         wrapper.appendChild(tagAdditionalPromptGroup);
 
         // 외관 태그 안내 (연락처 탭으로 이동됨)
@@ -2341,21 +2385,22 @@ function openSettingsPanel(onBack) {
             settings.snsKoreanTranslationPrompt = translationPromptInput.value;
             saveSettings();
         };
-        translationPromptGroup.append(translationPromptLabel, translationPromptInput);
+        translationPromptGroup.append(translationPromptLabel, translationPromptInput, createPromptSaveBtn());
         snsSection.appendChild(translationPromptGroup);
 
         if (!settings.snsPrompts) settings.snsPrompts = { ...SNS_PROMPT_DEFAULTS };
         const promptDefs = [
-            { key: 'postChar', label: '캐릭터 게시글 프롬프트' },
-            { key: 'postContact', label: '연락처 게시글 프롬프트' },
-            { key: 'imageDescription', label: '이미지 설명 프롬프트' },
-            { key: 'reply', label: '답글 프롬프트' },
-            { key: 'extraComment', label: '추가 댓글 프롬프트' },
+            { key: 'postChar', label: '캐릭터 게시글 프롬프트', hint: '{{charName}}: 캐릭터 이름, {{authorName}}: 작성자 이름, {{personality}}: 성격' },
+            { key: 'postContact', label: '연락처 게시글 프롬프트', hint: '{{authorName}}: 작성자 이름, {{personality}}: 성격, {{charName}}: 캐릭터 이름' },
+            { key: 'imageDescription', label: '이미지 설명 프롬프트', hint: '{{authorName}}: 작성자 이름, {{postContent}}: 게시글 내용' },
+            { key: 'reply', label: '답글 프롬프트', hint: '게시글: {{postAuthorName}}, {{postAuthorHandle}}, {{postContent}} | 댓글: {{commentAuthorName}}, {{commentAuthorHandle}}, {{commentText}} | 답글: {{replyAuthorName}}, {{replyAuthorHandle}}, {{replyPersonality}}' },
+            { key: 'extraComment', label: '추가 댓글 프롬프트', hint: '게시글: {{postAuthorName}}, {{postAuthorHandle}}, {{postContent}} | 댓글: {{extraAuthorName}}, {{extraAuthorHandle}}, {{extraPersonality}}' },
         ];
-        promptDefs.forEach(({ key, label }) => {
+        promptDefs.forEach(({ key, label, hint }) => {
             const group = document.createElement('div');
             group.className = 'slm-form-group';
             const lbl = Object.assign(document.createElement('label'), { className: 'slm-label', textContent: label });
+            const hintEl = Object.assign(document.createElement('div'), { className: 'slm-desc', textContent: `변수: ${hint}` });
             const input = document.createElement('textarea');
             input.className = 'slm-textarea';
             input.rows = 4;
@@ -2372,7 +2417,7 @@ function openSettingsPanel(onBack) {
                 input.value = settings.snsPrompts[key];
                 saveSettings();
             };
-            group.append(lbl, input, resetBtn);
+            group.append(lbl, hintEl, input, resetBtn, createPromptSaveBtn());
             snsSection.appendChild(group);
         });
 
@@ -2408,7 +2453,7 @@ function openSettingsPanel(onBack) {
             callSummaryInput.value = DEFAULT_SETTINGS.callSummaryPrompt;
             saveSettings();
         };
-        callSummaryGroup.append(callSummaryInput, callSummaryResetBtn);
+        callSummaryGroup.append(callSummaryInput, callSummaryResetBtn, createPromptSaveBtn());
         messageSection.appendChild(callSummaryGroup);
 
         // 메시지 템플릿 커스터마이징 (Item 3)
@@ -2495,7 +2540,7 @@ function openSettingsPanel(onBack) {
                 refreshPreview();
             };
             refreshPreview();
-            group.append(lbl, hintEl, input, preview, resetBtn);
+            group.append(lbl, hintEl, input, preview, resetBtn, createPromptSaveBtn());
             messageSection.appendChild(group);
         });
         return createTabs([
@@ -2529,6 +2574,51 @@ function openSettingsPanel(onBack) {
 function saveSettings() {
     const ctx = getContext();
     if (ctx?.saveSettingsDebounced) ctx.saveSettingsDebounced();
+}
+
+/**
+ * 프롬프트 저장 버튼 클릭 시 사용하는 강제 저장 함수.
+ * debounce 되지 않은 즉시 저장을 시도하고, 불가하면 debounced 저장 후 flush를 시도한다.
+ * @returns {boolean} 저장 시도 성공 여부
+ */
+function forceSaveSettings() {
+    const ctx = getContext();
+    if (!ctx) {
+        console.warn('[ST-LifeSim] forceSaveSettings: context not available');
+        return false;
+    }
+    if (typeof ctx.saveSettings === 'function') {
+        ctx.saveSettings();
+        return true;
+    }
+    if (ctx.saveSettingsDebounced) {
+        ctx.saveSettingsDebounced();
+        if (typeof ctx.saveSettingsDebounced.flush === 'function') {
+            ctx.saveSettingsDebounced.flush();
+        }
+        return true;
+    }
+    console.warn('[ST-LifeSim] forceSaveSettings: no save method available on context');
+    return false;
+}
+
+/**
+ * 프롬프트 커스텀 저장 버튼을 생성한다.
+ * @returns {HTMLButtonElement}
+ */
+function createPromptSaveBtn() {
+    const btn = document.createElement('button');
+    btn.className = 'slm-btn slm-btn-sm';
+    btn.textContent = '💾 저장';
+    btn.style.marginLeft = '6px';
+    btn.onclick = () => {
+        if (forceSaveSettings()) {
+            showToast('✅ 프롬프트가 저장되었습니다.', 'success', 1500);
+        } else {
+            showToast('⚠️ 저장에 실패했습니다. 다시 시도해주세요.', 'error', 2000);
+        }
+    };
+    return btn;
 }
 
 function hasForcedCallIntentFromLatestUserMessage() {
@@ -2662,11 +2752,15 @@ const PIC_TAG_REGEX = /<pic\s[^>]*?prompt="([^"]*)"[^>]*?\/?>/gi;
  * OFF: 주입을 제거하여 AI가 <pic> 태그를 출력하지 않도록 한다
  */
 // OFF 모드 이미지 프롬프트 — AI가 사진 상황을 <pic> 태그로 표시하되, 실제 생성은 하지 않음
-const MSG_IMAGE_OFF_PROMPT = '<image_generation_rule>\nWhen {{char}} would naturally send a photo or picture in the conversation, insert a <pic prompt="image description in Korean for the photo situation"> tag at that point in your response.\nThink about whether the current context calls for a photo — not only when someone explicitly says "photo" or "picture," but also when the situation naturally suggests one (e.g., {{user}} asks {{char}} to pose, make a gesture, or show something).\nRules:\n1) Default subject is {{char}} only. Always include {{char}}\'s name explicitly.\n2) If other characters from the contacts are involved, include their names explicitly.\n3) Include {{user}} only when context explicitly indicates both are together or the photo is focused on {{user}}. Use {{user}}\'s name explicitly.\n4) Do not mix unrelated character appearance traits.\n5) Keep the situation brief and visual.\n6) Each <pic> tag MUST describe a completely NEW unique scene. NEVER reuse, reference, or modify a previously generated image URL from the conversation.\n7) Analyze visual intent from context — if the user implies a visual action, generate a <pic> tag even without the word "photo".\n</image_generation_rule>';
+const MSG_IMAGE_OFF_PROMPT = '<image_generation_rule>\nWhen {{char}} would naturally TAKE A PHOTO with their phone and SEND IT via messenger, insert a <pic prompt="image description in Korean for the photo situation"> tag at that point in your response.\nThe image must be something {{char}} could physically take with their own phone camera and deliberately choose to send. Do NOT insert <pic> tags for narrative scene descriptions or emotional state illustrations.\nRules:\n1) Default subject is {{char}} only. Always include {{char}}\'s name explicitly.\n2) If other characters from the contacts are involved, include their names explicitly.\n3) Include {{user}} only when context explicitly indicates both are together or the photo is focused on {{user}}. Use {{user}}\'s name explicitly.\n4) Do not mix unrelated character appearance traits.\n5) Keep the situation brief and visual.\n6) Each <pic> tag MUST describe a completely NEW unique scene. NEVER reuse, reference, or modify a previously generated image URL from the conversation.\n7) Analyze visual intent from context — if the user implies a visual action, generate a <pic> tag even without the word "photo".\n8) Do NOT generate images just because the conversation mentions a visual scene. Only when {{char}} deliberately takes and sends a photo.\n</image_generation_rule>';
 
 function updateMessageImageInjection() {
     const ctx = getContext();
     if (!ctx || typeof ctx.setExtensionPrompt !== 'function') return;
+    if (isCallActive()) {
+        ctx.setExtensionPrompt(MSG_IMAGE_INJECT_TAG, '', 1, 0);
+        return;
+    }
     const settings = getSettings();
     if (settings.messageImageGenerationMode) {
         const prompt = settings.messageImageInjectionPrompt || DEFAULT_SETTINGS.messageImageInjectionPrompt;
@@ -2751,7 +2845,7 @@ async function applyCharacterImageDisplayMode() {
     // 각 매치에 대한 대체 문자열을 미리 계산한다 (역순 처리를 위해)
     /** @type {Array<{index: number, length: number, replacement: string}>} */
     const replacements = [];
-    const allowAutoImageGeneration = settings.messageImageGenerationMode && hasExplicitImageIntentAroundLatestMessage();
+    const allowAutoImageGeneration = !isCallActive() && settings.messageImageGenerationMode && hasExplicitImageIntentAroundLatestMessage();
 
     if (allowAutoImageGeneration) {
         // ── ON 모드: 이미지 생성 API로 실제 이미지 생성 ──
@@ -2772,7 +2866,7 @@ async function applyCharacterImageDisplayMode() {
                 replacements.push({ index: matchIndex, length: fullTag.length, replacement: '' });
                 continue;
             }
-            // 통합 이미지 태그 생성 (커스텀 프롬프트 없이 캐릭터 컨텍스트 기반)
+            // 통합 이미지 태그 생성 (커스텀 프롬프트 반영)
             const includeNames = [charName];
             collectMentionedContactNames(`${recentContextText}\n${rawPrompt}`, allContactsList).forEach((name) => {
                 if (name && !includeNames.includes(name)) includeNames.push(name);
@@ -2782,7 +2876,18 @@ async function applyCharacterImageDisplayMode() {
             if (userName && userHintRegex.test(rawPrompt.toLowerCase())) {
                 includeNames.push(userName);
             }
-            const tagResult = await generateImageTags(rawPrompt, {
+            // 커스텀 메신저 이미지 프롬프트 적용
+            const customMsgImgPrompt = settings.messageImagePrompt || '';
+            const charAppearanceTags = String(getAppearanceTagsByName(charName) || '').trim();
+            const resolvedCustomPrompt = customMsgImgPrompt
+                ? customMsgImgPrompt
+                    .replace(/\{charName\}/g, charName)
+                    .replace(/\{appearanceTags\}/g, charAppearanceTags)
+                : '';
+            const enrichedPrompt = resolvedCustomPrompt
+                ? `${resolvedCustomPrompt}\nScene: ${rawPrompt}`
+                : rawPrompt;
+            const tagResult = await generateImageTags(enrichedPrompt, {
                 includeNames,
                 contacts: allContactsList,
                 getAppearanceTagsByName,
@@ -3012,6 +3117,12 @@ async function init() {
 
     // 메신저 이미지 생성 프롬프트 주입 설정
     try { updateMessageImageInjection(); } catch (e) { console.error('[ST-LifeSim] 이미지 프롬프트 주입 오류:', e); }
+
+    // 비대면 규칙 컨텍스트 주입 (전체 확장에 적용)
+    registerContextBuilder('non-face-to-face', () => {
+        const charName = getContext()?.name2 || '{{char}}';
+        return `[NON-FACE-TO-FACE RULE]\n{{user}} and ${charName} communicate ONLY through mobile phone (text messages and phone calls). They CANNOT meet in person under any circumstances. This is an absolute, unchangeable rule.\n- NEVER suggest, plan, or describe meeting face-to-face.\n- NEVER describe being in the same physical location.\n- NEVER use phrases like "I'm coming over", "let's meet up", "I'm on my way", "기다려, 지금 출발했어", "만나러 갈게", "보러 갈게".\n- All interactions must remain strictly through the phone (messaging or calls).`;
+    });
 
     // ST-LifeSim 메뉴 버튼 삽입 (sendform 옆)
     try { injectLifeSimMenuButton(); } catch (e) { console.error('[ST-LifeSim] 메뉴 버튼 오류:', e); }
