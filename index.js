@@ -90,8 +90,8 @@ const DEFAULT_MESSAGE_TEMPLATES = {
     callStart_incoming: '📞 {charName}님께서 전화를 거셨습니다. {{user}}님께서 전화를 받으셨습니다.',
     callStart_outgoing: '📞 {charName}님께 전화를 걸었습니다. {charName}님께서 전화를 받으셨습니다.',
     callEnd: '📵 통화 종료 (통화시간: {timeStr})',
-    voiceMemo: '🎤 음성메시지 ({timeStr})<br>*내용: {hint}*',
-    voiceMemoAiPrompt: 'As {charName}, send exactly one voice message in Korean. You must choose suitable duration and content yourself based on current context.\nOutput only this HTML format:\n🎤 음성메시지 (M:SS)<br>내용: *[actual voice message content]*',
+    voiceMemo: '🎤 음성메시지 ({timeStr})<br>내용: {hint}',
+    voiceMemoAiPrompt: 'As {charName}, send exactly one voice message in Korean. You must choose suitable duration and content yourself based on current context.\nOutput only this HTML format:\n🎤 음성메시지 (M:SS)<br>[actual voice message content]',
     readReceipt: '{charName} sent a message to {{user}}. {{user}} has read {charName}\'s message but has not replied yet. Briefly describe {charName}\'s reaction in 1-2 sentences as dialogue.',
     noContact: '{charName} tried to reach {{user}} but {{user}} has not seen or responded yet. Briefly describe the situation in 1-2 sentences.',
     gifticonSend: '{emoji} **기프티콘 전송 완료**\n- 보내는 사람: {senderName}\n- 받는 사람: {recipient}\n- 품목: {name}{valuePart}{memoPart}',
@@ -996,6 +996,7 @@ function openSettingsPanel(onBack) {
         enabledCheck.onchange = () => {
             settings.enabled = enabledCheck.checked;
             saveSettings();
+            updateMessageImageInjection();
             if (!settings.enabled) {
                 clearContext();
                 document.querySelectorAll('.slm-rsf-icon').forEach(el => el.remove());
@@ -2920,6 +2921,10 @@ const MSG_IMAGE_OFF_PROMPT = '<image_generation_rule>\nWhen {{char}} would natur
 function updateMessageImageInjection() {
     const ctx = getContext();
     if (!ctx || typeof ctx.setExtensionPrompt !== 'function') return;
+    if (!isEnabled()) {
+        ctx.setExtensionPrompt(MSG_IMAGE_INJECT_TAG, '', 1, 0);
+        return;
+    }
     if (isCallActive()) {
         ctx.setExtensionPrompt(MSG_IMAGE_INJECT_TAG, '', 1, 0);
         return;
